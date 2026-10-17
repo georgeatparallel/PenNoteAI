@@ -89,6 +89,7 @@ export class ParallelSearcher {
   // Only this fixed MCP endpoint receives requests; credentials are never read.
   private rpc(method: string, params: object, signal: AbortSignal, notification = false): Promise<any> {
     const id = notification ? undefined : ++this.nextId;
+    const sessionId = this.sessionId;
     const body = JSON.stringify({ jsonrpc: "2.0", id, method, params });
     return new Promise((resolve, reject) => {
       const req = request(MCP_URL, {
@@ -99,7 +100,7 @@ export class ParallelSearcher {
           Accept: "application/json, text/event-stream",
           "User-Agent": USER_AGENT,
           "MCP-Protocol-Version": PROTOCOL_VERSION,
-          ...(this.sessionId ? { "Mcp-Session-Id": this.sessionId } : {}),
+          ...(sessionId ? { "Mcp-Session-Id": sessionId } : {}),
         },
       }, (response) => {
         const session = response.headers["mcp-session-id"];
@@ -115,6 +116,12 @@ export class ParallelSearcher {
         response.on("end", () => {
           try {
             const status = response.statusCode ?? 0;
+            // An expired transport session must not poison every later search.
+            // Report this failure, then reconnect on the next requested search.
+            if (status === 404 && sessionId && this.sessionId === sessionId) {
+              this.initialized = undefined;
+              this.sessionId = undefined;
+            }
             if (status < 200 || status >= 300) throw new Error(`Parallel MCP failed: HTTP ${status}`);
             if (notification) { resolve(undefined); return; }
             const text = Buffer.concat(chunks).toString("utf8");

@@ -45,7 +45,7 @@ function mockServer(handler = () => ({})) {
         const response = new EventEmitter();
         response.statusCode = override.status ?? (message.id ? 200 : 202);
         response.headers = { 'content-type': override.sse ? 'text/event-stream' : 'application/json',
-          ...(message.method === 'initialize' ? { 'mcp-session-id': 'transport-session' } : {}) };
+          ...(message.method === 'initialize' ? { 'mcp-session-id': override.sessionId ?? 'transport-session' } : {}) };
         callback(response);
         let data;
         switch (message.method) {
@@ -158,6 +158,31 @@ test('HTTP, RPC, tool, malformed-result and network failures surface without pro
       assert.equal(server.calls.filter((call) => call.message.method === 'tools/call').length, 1);
     } finally { server.restore(); }
   }
+});
+
+test('an expired MCP session reconnects on the next search without retrying or changing quota identity', async () => {
+  let sessions = 0;
+  let searches = 0;
+  const server = mockServer((message) => {
+    if (message.method === 'initialize') return { sessionId: `transport-${++sessions}` };
+    if (message.method === 'tools/call' && ++searches === 1) return { status: 404 };
+  });
+  try {
+    const searcher = new ParallelSearcher();
+    const runner = new ToolRunner({}, searcher, {}, 5);
+    const failed = await runner.execute('search_web', { query: 'first search' });
+    assert.equal(failed.success, false);
+    assert.match(failed.data, /HTTP 404/);
+    assert.equal(searches, 1);
+    const recovered = await runner.execute('search_web', { query: 'next search' });
+    assert.equal(recovered.success, true);
+    assert.match(recovered.data, /docs.obsidian.md/);
+    assert.equal(sessions, 2);
+    const calls = server.calls.filter((call) => call.message.method === 'tools/call');
+    assert.equal(calls[0].options.headers['Mcp-Session-Id'], 'transport-1');
+    assert.equal(calls[1].options.headers['Mcp-Session-Id'], 'transport-2');
+    assert.equal(calls[0].message.params.arguments.session_id, calls[1].message.params.arguments.session_id);
+  } finally { server.restore(); }
 });
 
 test('search deadline and cancellation abort the actual request; invalid inputs do no I/O', async () => {
